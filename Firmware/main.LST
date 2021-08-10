@@ -1,0 +1,463 @@
+C51 COMPILER V9.01   MAIN                                                                  08/10/2021 22:10:37 PAGE 1   
+
+
+C51 COMPILER V9.01, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN main.OBJ
+COMPILER INVOKED BY: C:\Keil_v4\C51\BIN\C51.EXE main.c LARGE BROWSE DEBUG OBJECTEXTEND
+
+line level    source
+
+   1          #include <REGX52.H>
+   2          #include "LCD1602.h"
+   3          #include "DS1302.h"
+   4          #include <string.h>
+   5          #include <stdio.h>
+   6          #include "dht111.h"
+   7          
+   8          #define LCD 2004        //Choose your display LCD parameter now 1602&2004 supported
+   9          #define UTC     8               //UNUSED
+  10          
+  11          #define WARNINGHIGHTEMP 37      //Environment temp warning limit
+  12          #define WARNINGHIGHHUMI 80  //Environment humidity warning limit. Use with temp warning
+  13          #define WARNINGLOWTEMP 5    //Environment low temp warning limit
+  14          #define GPSUPDATEINTERVAL 3600  //Seconds to sync local time with GPS
+  15          #define GPSGRIDINTERVAL 300             //Seconds to sync grid locator with GPS
+  16          
+  17          #define FOSC 11059200L      //System frequency
+  18          #define BAUD 9600           //UART baudrate
+  19          
+  20          /*Define UART parity mode*/
+  21          #define NONE_PARITY     0   //None parity
+  22          #define ODD_PARITY      1   //Odd parity
+  23          #define EVEN_PARITY     2   //Even parity
+  24          #define MARK_PARITY     3   //Mark parity
+  25          #define SPACE_PARITY    4   //Space parity
+  26          
+  27          #define PARITYBIT NONE_PARITY   //Testing even parity
+  28          
+  29          typedef unsigned char BYTE;
+  30          typedef unsigned int WORD;
+  31          
+  32          
+  33          unsigned char time_buf[8] = {0x20,0x21,0x08,0x03,0x20,0x00,0x00,0x02};  
+  34          unsigned char dis_time_buf[20]={0};
+  35          unsigned char dis_banner_buf[20];
+  36          unsigned char test_buf[20];
+  37          
+  38          unsigned char ifGPSLocked=0,ifInWarning=0,ifFlashed=0;
+  39          unsigned char *Callsign="BG2KAJ";               //Modify here to change your own callsign
+  40          unsigned char xdata recv_buffer[100];
+  41          unsigned char Grid[6];
+  42          int recv_counter=0,data update_counter=0,grid_counter=0,date_counter=0;
+  43          float lat=0,lon=0;
+  44          
+  45          bit busy,firstPWR=1;
+  46          
+  47          
+  48          
+  49          unsigned char hour,minute;
+  50          data int temp=25,humi=50;
+  51          extern int data temp_value, humi_value;
+  52          int comma_counter=0;
+  53          
+  54          void ds1302_write_time(void);
+  55          void ds1302_read_time(void);
+C51 COMPILER V9.01   MAIN                                                                  08/10/2021 22:10:37 PAGE 2   
+
+  56          void SendData(BYTE dat);
+  57          void SendString(char *s);
+  58          void calcLocator(char *dst, float lat, float lon);
+  59          
+  60          void main()
+  61          {
+  62   1              int i;
+  63   1              for(i=0;i<100;i++)
+  64   1                      recv_buffer[i]=0;
+  65   1      #if (PARITYBIT == NONE_PARITY)
+  66   1          SCON = 0x50;            //8-bit variable UART
+  67   1      #elif (PARITYBIT == ODD_PARITY) || (PARITYBIT == EVEN_PARITY) || (PARITYBIT == MARK_PARITY)
+                  SCON = 0xda;            //9-bit variable UART, parity bit initial to 1
+              #elif (PARITYBIT == SPACE_PARITY)
+                  SCON = 0xd2;            //9-bit variable UART, parity bit initial to 0
+              #endif
+  72   1              //Init serial port
+  73   1          TMOD = 0x20;            //Set Timer1 as 8-bit auto reload mode
+  74   1          TH1 = TL1 = -(FOSC/12/32/BAUD); //Set auto-reload vaule
+  75   1          TR1 = 1;                //Timer1 start run
+  76   1          ES = 1;                 //Enable UART interrupt
+  77   1          EA = 1;                 //Open master interrupt switch
+  78   1      
+  79   1              Initialize_LCD();
+  80   1              ClearLine(1);
+  81   1              ClearLine(2);
+  82   1              ds1302_init();
+  83   1      
+  84   1              if(LCD==2004)
+  85   1              {
+  86   2                      PutString(1,1,"                    ");
+  87   2                      PutString(2,1,"    Initializing    ");
+  88   2                      sprintf(dis_banner_buf,"    %s          ",Callsign);
+  89   2                      PutString(3,1,dis_banner_buf);
+  90   2                      PutString(4,1,"                    ");
+  91   2              }
+  92   1              else if(LCD==1602)
+  93   1              {
+  94   2                      PutString(1,1,"  Initializing  ");
+  95   2                      sprintf(dis_banner_buf,"  %s        ",Callsign);
+  96   2                      PutString(2,1,dis_banner_buf);
+  97   2              }
+  98   1              Delay_1ms(1500);
+  99   1      //      ds1302_write_time();
+ 100   1              while(1)
+ 101   1              {
+ 102   2              if(recv_counter!=0)
+ 103   2              {
+ 104   3                      for(i=0;i<100;i++)
+ 105   3                      {
+ 106   4                              if(recv_buffer[i]==',')
+ 107   4                                      comma_counter+=1;       
+ 108   4                      }
+ 109   3                      if((comma_counter==12)&&(recv_buffer[0]=='$'))
+ 110   3                      {
+ 111   4                              //Start parse GPS data
+ 112   4                              update_counter+=1;
+ 113   4                              grid_counter+=1;
+ 114   4                              //For Debug     Use
+ 115   4      //                      SendString(recv_buffer);
+ 116   4      
+ 117   4                              //Update GPS state
+C51 COMPILER V9.01   MAIN                                                                  08/10/2021 22:10:37 PAGE 3   
+
+ 118   4                              if(recv_buffer[18]=='A')
+ 119   4                                      ifGPSLocked=1;
+ 120   4                              else
+ 121   4                                      ifGPSLocked=0;
+ 122   4                                      
+ 123   4                              if((update_counter>GPSUPDATEINTERVAL)||(firstPWR==1))
+ 124   4                              {
+ 125   5                                      //Update time and date
+ 126   5                                      update_counter=0;
+ 127   5                                      for(i=0;i<100;i++)
+ 128   5                                      {
+ 129   6                                              if(recv_buffer[i]==',')
+ 130   6                                                      comma_counter+=1;
+ 131   6                                              if(comma_counter==9)
+ 132   6                                                      date_counter=i+1;               
+ 133   6                                      }
+ 134   5                                      time_buf[1]=(recv_buffer[61]-'0')*16+(recv_buffer[62]-'0');                     //year
+ 135   5                                      time_buf[2]=(recv_buffer[59]-'0')*16+(recv_buffer[60]-'0');                     //month
+ 136   5                                      time_buf[3]=(recv_buffer[57]-'0')*16+(recv_buffer[58]-'0');                     //day
+ 137   5                                      time_buf[4]=(recv_buffer[7]-'0')*16+(recv_buffer[8]-'0');                       //time
+ 138   5                                      time_buf[5]=(recv_buffer[9]-'0')*16+(recv_buffer[10]-'0');                      //min
+ 139   5                                      time_buf[6]=(recv_buffer[11]-'0')*16+(recv_buffer[12]-'0');                     //sec
+ 140   5                                      ds1302_write_time();
+ 141   5                              }
+ 142   4                              
+ 143   4                              //Grid Calculate
+ 144   4                              if((grid_counter>GPSGRIDINTERVAL)||(firstPWR==1))
+ 145   4                              {
+ 146   5                                      //Update time and date
+ 147   5                                      grid_counter=0;
+ 148   5                                      firstPWR=0;
+ 149   5                                      lat=(recv_buffer[20]-'0')*10+(recv_buffer[21]-'0')*1+((recv_buffer[22]-'0')*10+(recv_buffer[23]-'0')*1
+             -+(recv_buffer[25]-'0')*0.1+(recv_buffer[26]-'0')*0.01)/60;
+ 150   5                                      if(recv_buffer[31]=='S')
+ 151   5                                              lat=0-lat;
+ 152   5      
+ 153   5                                      lon=(recv_buffer[33]-'0')*100+(recv_buffer[34]-'0')*10+(recv_buffer[35]-'0')*1+((recv_buffer[36]-'0')*
+             -10+(recv_buffer[37]-'0')*1+(recv_buffer[39]-'0')*0.1+(recv_buffer[40]-'0')*0.01)/60;
+ 154   5                                      if(recv_buffer[31]=='W')
+ 155   5                                              lon=0-lon;
+ 156   5                                      calcLocator(Grid,lat,lon);
+ 157   5                              }
+ 158   4                                              
+ 159   4                      }
+ 160   3                      
+ 161   3                      comma_counter=0;
+ 162   3                      recv_counter=0;
+ 163   3                      date_counter=0;
+ 164   3                      for(i=0;i<100;i++)
+ 165   3                              recv_buffer[i]=0;
+ 166   3              }
+ 167   2               for(i=0;i<9999;i++);
+ 168   2                      if(LCD==2004)
+ 169   2                      {
+ 170   3                              if(ifGPSLocked==1)
+ 171   3                              {
+ 172   4                                      sprintf(dis_banner_buf," %s       [GPS] ",Callsign);
+ 173   4                                      PutString(1,1,dis_banner_buf);
+ 174   4                                      sprintf(dis_banner_buf," GRID: %s       ",Grid);
+ 175   4                                      PutString(3,1,dis_banner_buf);
+ 176   4                              }
+ 177   3                              else
+C51 COMPILER V9.01   MAIN                                                                  08/10/2021 22:10:37 PAGE 4   
+
+ 178   3                              {
+ 179   4                                      sprintf(dis_banner_buf," %s             ",Callsign);
+ 180   4                                      PutString(1,1,dis_banner_buf);
+ 181   4                                      PutString(3,1," GRID: Waiting GPS  ");
+ 182   4                              }
+ 183   3                              
+ 184   3                              ds1302_read_time();
+ 185   3                              dis_time_buf[0]=' ';
+ 186   3                      //      dis_time_buf[1]=(time_buf[0]>>4)+'0'; //年   
+ 187   3                              dis_time_buf[1]='2'; //年  
+ 188   3                      //      dis_time_buf[2]=(time_buf[0]&0x0f)+'0';
+ 189   3                              dis_time_buf[2]='0';
+ 190   3      
+ 191   3                              dis_time_buf[3]=(time_buf[1]>>4)+'0';   
+ 192   3                              dis_time_buf[4]=(time_buf[1]&0x0f)+'0';
+ 193   3                      
+ 194   3                              dis_time_buf[5]=(time_buf[2]>>4)+'0'; //月  
+ 195   3                              dis_time_buf[6]=(time_buf[2]&0x0f)+'0';
+ 196   3                              
+ 197   3                              dis_time_buf[7]=(time_buf[3]>>4)+'0'; //日   
+ 198   3                              dis_time_buf[8]=(time_buf[3]&0x0f)+'0';
+ 199   3                              
+ 200   3                              dis_time_buf[9]=' ';
+ 201   3                      
+ 202   3                              dis_time_buf[10]=(time_buf[4]>>4)+'0'; //时   
+ 203   3                              dis_time_buf[11]=(time_buf[4]&0x0f)+'0';   
+ 204   3                              dis_time_buf[12]=':';
+ 205   3                              dis_time_buf[13]=(time_buf[5]>>4)+'0'; //分   
+ 206   3                              dis_time_buf[14]=(time_buf[5]&0x0f)+'0';   
+ 207   3                              dis_time_buf[15]=':';   
+ 208   3                              dis_time_buf[16]=(time_buf[6]>>4)+'0'; //秒 
+ 209   3                              dis_time_buf[17]=(time_buf[6]&0x0f)+'0';
+ 210   3                              PutString(2,1,dis_time_buf); 
+ 211   3                              
+ 212   3                              ES=0; 
+ 213   3                              EA=0;
+ 214   3                              if(DHT11_ReadTempAndHumi()==OK)
+ 215   3                              {
+ 216   4                                      temp=temp_value/10;
+ 217   4                                      humi=humi_value/10;
+ 218   4                              }
+ 219   3                              ES=1;
+ 220   3                              EA=1;
+ 221   3                              if(temp<=WARNINGLOWTEMP)
+ 222   3                              {
+ 223   4                                      ifInWarning=1;
+ 224   4                                      sprintf(dis_banner_buf," TEMP:%d'C HUMI:%d% ",temp,humi);
+ 225   4                                      PutString(3,1,dis_banner_buf);
+ 226   4                                      sprintf(dis_banner_buf,"  ! COLD WX WARN !   ",temp,humi);
+ 227   4                                      PutString(4,1,dis_banner_buf);
+ 228   4                              }
+ 229   3                              else if((temp>WARNINGLOWTEMP)&&(temp<WARNINGHIGHTEMP))
+ 230   3                              {
+ 231   4                                      ifInWarning=0;
+ 232   4                                      sprintf(dis_banner_buf," TEMP:%d'C HUMI:%d% ",temp,humi);
+ 233   4                                      PutString(4,1,dis_banner_buf);
+ 234   4                              }
+ 235   3                              else if((temp>=WARNINGHIGHTEMP)&&(humi<=WARNINGHIGHHUMI))
+ 236   3                              {
+ 237   4                                      ifInWarning=1;
+ 238   4      
+ 239   4                                      sprintf(dis_banner_buf," TEMP:%d'C HUMI:%d% ",temp,humi);
+C51 COMPILER V9.01   MAIN                                                                  08/10/2021 22:10:37 PAGE 5   
+
+ 240   4                                      PutString(3,1,dis_banner_buf);
+ 241   4      
+ 242   4                                      sprintf(dis_banner_buf," ! HIGH TEMP WARN ! ",temp,humi);
+ 243   4                                      PutString(4,1,dis_banner_buf);
+ 244   4                              }
+ 245   3                              else if((temp>=WARNINGHIGHTEMP)&&(humi>=WARNINGHIGHHUMI))
+ 246   3                              {
+ 247   4                                      ifInWarning=1;
+ 248   4      
+ 249   4                                      sprintf(dis_banner_buf," TEMP:%d'C HUMI:%d% ",temp,humi);
+ 250   4                                      PutString(3,1,dis_banner_buf);
+ 251   4      
+ 252   4                                      sprintf(dis_banner_buf," !HEATSTROKE WARN!  ",temp,humi);
+ 253   4                                      PutString(4,1,dis_banner_buf);
+ 254   4                              }       
+ 255   3                      }
+ 256   2                      else if(LCD==1602)
+ 257   2                      {
+ 258   3                              if(ifGPSLocked==1)
+ 259   3                                      sprintf(dis_banner_buf," %s  %02d'C G ",Callsign,temp);
+ 260   3                              else
+ 261   3                                      sprintf(dis_banner_buf," %s  %02d'C   ",Callsign,temp);
+ 262   3                              PutString(1,1,dis_banner_buf);
+ 263   3      
+ 264   3                              ds1302_read_time();
+ 265   3                              if(DHT11_ReadTempAndHumi()==OK)
+ 266   3                              {
+ 267   4                                      temp=temp_value/10;
+ 268   4                                      humi=humi_value/10;
+ 269   4                              }
+ 270   3                              if(temp<=WARNINGLOWTEMP)
+ 271   3                              {
+ 272   4                                      ifInWarning=1; 
+ 273   4                                      sprintf(dis_banner_buf,"%02d'C & %02d%% HUMI ",temp,humi);
+ 274   4                                      PutString(1,1,dis_banner_buf);
+ 275   4                                      sprintf(dis_banner_buf,"! COLD WX WARN !",temp,humi);
+ 276   4                                      PutString(2,1,dis_banner_buf);
+ 277   4                              }
+ 278   3                              else if((temp>WARNINGLOWTEMP)&&(temp<=WARNINGHIGHTEMP))
+ 279   3                              {
+ 280   4                                      ifInWarning=0;
+ 281   4                                      if(ifGPSLocked==1)
+ 282   4                                              sprintf(dis_banner_buf," %c%c:%c%c   %s ",(time_buf[4]>>4)+'0',(time_buf[4]&0x0f)+'0',(time_buf[5]>>4
+             -)+'0',(time_buf[5]&0x0f)+'0',Grid);
+ 283   4                                      else
+ 284   4                                              sprintf(dis_banner_buf," %c%c:%c%c   No GPS ",(time_buf[4]>>4)+'0',(time_buf[4]&0x0f)+'0',(time_buf[5
+             -]>>4)+'0',(time_buf[5]&0x0f)+'0');
+ 285   4                                      PutString(2,1,dis_banner_buf);
+ 286   4                              }
+ 287   3                              else if((temp>=WARNINGHIGHTEMP)&&(humi<=WARNINGHIGHHUMI))
+ 288   3                              {
+ 289   4                                      ifInWarning=1; 
+ 290   4                                      sprintf(dis_banner_buf,"%02d'C & %02d%% HUMI ",temp,humi);
+ 291   4                                      PutString(1,1,dis_banner_buf);
+ 292   4                                      sprintf(dis_banner_buf,"!HIGH TEMP WARN!",temp,humi);
+ 293   4                                      PutString(2,1,dis_banner_buf);
+ 294   4                              }
+ 295   3                              else if((temp>=WARNINGHIGHTEMP)&&(humi>=WARNINGHIGHHUMI))
+ 296   3                              {
+ 297   4                                      ifInWarning=1;
+ 298   4                                      sprintf(dis_banner_buf,"%02d'C & %02d%% HUMI ",temp,humi);
+ 299   4                                      PutString(1,1,dis_banner_buf);
+C51 COMPILER V9.01   MAIN                                                                  08/10/2021 22:10:37 PAGE 6   
+
+ 300   4                                      sprintf(dis_banner_buf,"HEATSTROKE WARN!",temp,humi);
+ 301   4                                      PutString(2,1,dis_banner_buf);
+ 302   4                              }
+ 303   3                      } 
+ 304   2              }
+ 305   1      
+ 306   1      }
+ 307          
+ 308          //向DS302写入时钟数据
+ 309          void ds1302_write_time(void) 
+ 310          {
+ 311   1              ds1302_write_byte(ds1302_control_add,0x00);                     //关闭写保护 
+ 312   1              ds1302_write_byte(ds1302_sec_add,0x80);                         //暂停时钟 
+ 313   1              //ds1302_write_byte(ds1302_charger_add,0xa9);       //涓流充电 
+ 314   1              ds1302_write_byte(ds1302_year_add,time_buf[1]);         //年 
+ 315   1              ds1302_write_byte(ds1302_month_add,time_buf[2]);        //月 
+ 316   1              ds1302_write_byte(ds1302_date_add,time_buf[3]);         //日 
+ 317   1              ds1302_write_byte(ds1302_hr_add,time_buf[4]);           //时 
+ 318   1              ds1302_write_byte(ds1302_min_add,time_buf[5]);          //分
+ 319   1              ds1302_write_byte(ds1302_sec_add,time_buf[6]);          //秒
+ 320   1              ds1302_write_byte(ds1302_day_add,time_buf[7]);          //周 
+ 321   1              ds1302_write_byte(ds1302_control_add,0x80);                     //打开写保护     
+ 322   1      }
+ 323          //从DS302读出时钟数据
+ 324          void ds1302_read_time(void)  
+ 325          {
+ 326   1              time_buf[1]=ds1302_read_byte(ds1302_year_add);          //年 
+ 327   1              time_buf[2]=ds1302_read_byte(ds1302_month_add);         //月 
+ 328   1              time_buf[3]=ds1302_read_byte(ds1302_date_add);          //日 
+ 329   1              time_buf[4]=ds1302_read_byte(ds1302_hr_add);            //时 
+ 330   1              time_buf[5]=ds1302_read_byte(ds1302_min_add);           //分 
+ 331   1              time_buf[6]=(ds1302_read_byte(ds1302_sec_add))&0x7f;//秒，屏蔽秒的第7位，避免超出59
+ 332   1              time_buf[7]=ds1302_read_byte(ds1302_day_add);           //周    
+ 333   1      }
+ 334          void Uart_Isr() interrupt 4 using 1
+ 335          {
+ 336   1          if (RI)
+ 337   1          {
+ 338   2              RI = 0;             //Clear receive interrupt flag
+ 339   2      //        P0 = SBUF;          //P0 show UART data
+ 340   2      //        bit9 = RB8;         //P2.2 show parity bit
+ 341   2                      recv_buffer[recv_counter]=SBUF;
+ 342   2                      recv_counter+=1;
+ 343   2          }
+ 344   1          if (TI)
+ 345   1          {
+ 346   2              TI = 0;             //Clear transmit interrupt flag
+ 347   2              busy = 0;           //Clear transmit busy flag
+ 348   2          }
+ 349   1      }
+ 350          
+ 351          /*----------------------------
+ 352          Send a byte data to UART
+ 353          Input: dat (data to be sent)
+ 354          Output:None
+ 355          ----------------------------*/
+ 356          void SendData(BYTE dat)
+ 357          {
+ 358   1          while (busy);           //Wait for the completion of the previous data is sent
+ 359   1          ACC = dat;              //Calculate the even parity bit P (PSW.0)
+ 360   1          if (P)                  //Set the parity bit according to P
+ 361   1          {
+C51 COMPILER V9.01   MAIN                                                                  08/10/2021 22:10:37 PAGE 7   
+
+ 362   2      #if (PARITYBIT == ODD_PARITY)
+                      TB8 = 0;            //Set parity bit to 0
+              #elif (PARITYBIT == EVEN_PARITY)
+                      TB8 = 1;            //Set parity bit to 1
+              #endif
+ 367   2          }
+ 368   1          else
+ 369   1          {
+ 370   2      #if (PARITYBIT == ODD_PARITY)
+                      TB8 = 1;            //Set parity bit to 1
+              #elif (PARITYBIT == EVEN_PARITY)
+                      TB8 = 0;            //Set parity bit to 0
+              #endif
+ 375   2          }
+ 376   1          busy = 1;
+ 377   1          SBUF = ACC;             //Send data to UART buffer
+ 378   1      }
+ 379          
+ 380          /*----------------------------
+ 381          Send a string to UART
+ 382          Input: s (address of string)
+ 383          Output:None
+ 384          ----------------------------*/
+ 385          void SendString(char *s)
+ 386          {
+ 387   1          while (*s)              //Check the end of the string
+ 388   1          {
+ 389   2              SendData(*s++);     //Send current char and increment string ptr
+ 390   2          }
+ 391   1      }
+ 392          
+ 393          void calcLocator(char *dst, float lat, float lon) {
+ 394   1        int o1, o2, o3;
+ 395   1        int a1, a2, a3;
+ 396   1        float remainder;
+ 397   1        // longitude
+ 398   1        remainder = lon + 180.0;
+ 399   1        o1 = (int)(remainder / 20.0);
+ 400   1        remainder = remainder - (float)o1 * 20.0;
+ 401   1        o2 = (int)(remainder / 2.0);
+ 402   1        remainder = remainder - 2.0 * (float)o2;
+ 403   1        o3 = (int)(12.0 * remainder);
+ 404   1      
+ 405   1        // latitude
+ 406   1        remainder = lat + 90.0;
+ 407   1        a1 = (int)(remainder / 10.0);
+ 408   1        remainder = remainder - (float)a1 * 10.0;
+ 409   1        a2 = (int)(remainder);
+ 410   1        remainder = remainder - (float)a2;
+ 411   1        a3 = (int)(24.0 * remainder);
+ 412   1        dst[0] = (char)o1 + 'A';
+ 413   1        dst[1] = (char)a1 + 'A';
+ 414   1        dst[2] = (char)o2 + '0';
+ 415   1        dst[3] = (char)a2 + '0';
+ 416   1        dst[4] = (char)o3 + 'A';
+ 417   1        dst[5] = (char)a3 + 'A';
+ 418   1        dst[6] = (char)0;
+ 419   1      }
+ 420          
+ 421          
+ 422          
+
+C51 COMPILER V9.01   MAIN                                                                  08/10/2021 22:10:37 PAGE 8   
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   2905    ----
+   CONSTANT SIZE    =    394    ----
+   XDATA SIZE       =    194      30
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     10    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      2    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

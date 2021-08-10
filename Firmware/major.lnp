@@ -1,0 +1,7 @@
+"STARTUP.obj",
+"main.obj",
+"LCD1602B.obj",
+"DS1302.obj",
+"dht111.obj" 
+TO "major" 
+RAMSIZE(256) 
